@@ -17,6 +17,7 @@ const DURATION_LABELS = {
 };
 const DEFAULT_TIME = { start_time: "09:00", end_time: "18:00" };
 const DEFAULT_CUSTOM_TIME = { start_time: "09:00", end_time: "13:00" };
+const PART_LABELS = { first_half: "AM", second_half: "PM", custom_hours: "Hrs" };
 const blankEmployee = {
   employee_code: "",
   full_name: "",
@@ -71,7 +72,7 @@ export default function App() {
   const [preparingPdf, setPreparingPdf] = useState(false);
   const submissionLock = useRef(false);
   const exportLock = useRef(false);
-  const noticeTimer = useRef(0);
+  const noticeTimer = useRef(null);
   const [employeeModal, setEmployeeModal] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState(null);
   const [employeeForm, setEmployeeForm] = useState(blankEmployee);
@@ -447,6 +448,7 @@ export default function App() {
   }
 
   const [now, setNow] = useState(() => new Date());
+  const [reportGeneratedAt, setReportGeneratedAt] = useState(() => new Date());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(timer);
@@ -471,12 +473,12 @@ export default function App() {
       .sort((a, b) => a.start_date.localeCompare(b.start_date)),
     [leaves, todayKey],
   );
-  const totalHours = useMemo(
-    () => leaves
-      .filter((leave) => leave.status !== "cancelled")
-      .reduce((sum, leave) => sum + (leave.total_hours || 0), 0),
-    [leaves],
-  );
+  const awayTodayPeople = useMemo(() => {
+    const activeIds = new Set(activeEmployees.map((employee) => employee.id));
+    return new Set(
+      awayToday.filter((leave) => activeIds.has(leave.employee_id)).map((leave) => leave.employee_id),
+    ).size;
+  }, [awayToday, activeEmployees]);
 
   const filteredEmployees = useMemo(() => employees.filter((employee) => {
     const matchesSearch = [
@@ -623,35 +625,28 @@ export default function App() {
     if (exportLock.current || !reportRangeValid) return;
     exportLock.current = true;
     setPreparingPdf(true);
+    setReportGeneratedAt(new Date());
     setError("");
-    requestAnimationFrame(() => {
-      let finished = false;
-      const timeout = window.setTimeout(() => {
-        if (finished) return;
-        finished = true;
-        exportLock.current = false;
-        setPreparingPdf(false);
-        setError("Print dialog did not finish. Export controls are available again.");
-      }, 15000);
-      const finish = (message) => {
-        if (finished) return;
-        finished = true;
-        window.clearTimeout(timeout);
-        exportLock.current = false;
-        setPreparingPdf(false);
-        notify(message);
-      };
-      window.addEventListener("afterprint", () => finish("Report ready. The print dialog has closed."), { once: true });
+    const previousTitle = document.title;
+    document.title = `LeaveHQ Leave Report ${reportStart} to ${reportEnd}`;
+    const finish = () => {
+      document.title = previousTitle;
+      exportLock.current = false;
+      setPreparingPdf(false);
+    };
+    // two frames so React has committed the new "generated" date before the print snapshot
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      window.addEventListener("afterprint", () => {
+        finish();
+        notify("Report ready. The print dialog has closed.");
+      }, { once: true });
       try {
         window.print();
       } catch (exportError) {
-        finished = true;
-        window.clearTimeout(timeout);
-        exportLock.current = false;
-        setPreparingPdf(false);
+        finish();
         setError(`Unable to prepare PDF report. ${exportError.message}`);
       }
-    });
+    }));
   }
 
   if (authStatus === "checking") {
@@ -704,7 +699,7 @@ export default function App() {
         <div className="sidebar-bottom">
           <div className="admin-avatar" aria-hidden="true">A</div>
           <div><b>{adminUsername || "Administrator"}</b><small>Leave management</small></div>
-          <button type="button" className="sidebar-signout" onClick={signOut}>Sign out</button>
+          <button type="button" className="sidebar-signout" onClick={signOut} aria-label="Sign out" title="Sign out"><Icon name="logout" /></button>
         </div>
       </aside>
 
@@ -770,13 +765,13 @@ export default function App() {
                   id="overview-title"
                   title="Your team, at a glance"
                   description="A clear view of today's availability and upcoming leave."
-                  action={<Button variant="secondary" onClick={() => refresh({ all: true })} disabled={refreshing}><Icon name="refresh" /> {refreshing ? "Refreshing..." : "Refresh"}</Button>}
+                  action={<Button variant="secondary" onClick={() => refresh({ all: true })} busy={refreshing}><Icon name="refresh" /> {refreshing ? "Refreshing..." : "Refresh"}</Button>}
                 />
                 <div className="stats-grid">
-                  <Metric label="Active employees" value={activeEmployees.length} detail="Current workforce" icon="users" />
-                  <Metric label="On leave today" value={awayToday.length} detail="Leave records today" icon="calendar" />
-                  <Metric label="Upcoming leave" value={upcoming.length} detail="Planned leave records" icon="clock" />
-                  <Metric label="Leave hours recorded" value={formatHours(totalHours)} detail="All time, excluding cancelled" icon="chart" />
+                  <Metric label="Available today" value={Math.max(activeEmployees.length - awayTodayPeople, 0)} detail={`of ${activeEmployees.length} active employees`} icon="users" />
+                  <Metric label="Away today" value={awayTodayPeople} detail={awayTodayPeople === 1 ? "1 employee on leave" : `${awayTodayPeople} employees on leave`} icon="calendar" />
+                  <Metric label="Upcoming leave" value={upcoming.length} detail="Planned records ahead" icon="clock" />
+                  <Metric label="Overlapping absences" value={collisions.length} detail={collisions.length ? "Review in Reports" : "No clashes found"} icon="alert" tone={collisions.length ? "warn" : undefined} />
                 </div>
                 <div className="overview-grid">
                   <Panel title="Away today" description={formatDate(todayKey, { weekday: "long", day: "numeric", month: "long" })}>
@@ -859,7 +854,7 @@ export default function App() {
                       </table>
                     </div>
                   ) : (
-                    <EmptyState title="No employees found" description="Try another search or add an employee." />
+                    <EmptyState icon="search" title="No employees found" description="Try another search or add an employee." />
                   )}
                 </Panel>
               </section>
@@ -922,8 +917,9 @@ export default function App() {
                           : null;
                         const chosen = date && selectedDates.includes(date);
                         const dayLeaves = date ? calendarLeavesByDate.get(date) || [] : [];
+                        const cellClass = ["calendar-cell", !day && "is-empty", date === todayKey && "is-today", index % 7 >= 5 && "is-weekend", chosen && "is-selected"].filter(Boolean).join(" ");
                         return (
-                          <div className={`calendar-cell ${date === todayKey ? "is-today" : ""}`} key={`${month.getMonth()}-${index}`}>
+                          <div className={cellClass} key={`${month.getMonth()}-${index}`}>
                             {day && (
                               <>
                                 <button
@@ -934,16 +930,16 @@ export default function App() {
                                   onClick={() => toggleDate(date)}
                                 >
                                   <span className="day-number">{day}</span>
-                                  {chosen && <span className="selected-mark"><Icon name="check" /></span>}
                                 </button>
                                 <div className="day-leaves">
                                   {dayLeaves.slice(0, 2).map((leave) => (
                                     <div className={`calendar-event ${leave.status}`} key={leave.id} title={`${leave.employee_name} · ${leave.start_time?.slice(0, 5)}–${leave.end_time?.slice(0, 5)}`}>
                                       <span className="event-dot" />
-                                      <span>{leave.employee_name}</span>
+                                      <span className="event-name">{leave.employee_name}</span>
+                                      {PART_LABELS[leave.duration_type] && <span className="event-part">{PART_LABELS[leave.duration_type]}</span>}
                                     </div>
                                   ))}
-                                  {dayLeaves.length > 2 && <span className="more-events">+{dayLeaves.length - 2} more</span>}
+                                  {dayLeaves.length > 2 && <span className="more-events" title={dayLeaves.slice(2).map((leave) => leave.employee_name).join(", ")}>+{dayLeaves.length - 2} more</span>}
                                 </div>
                               </>
                             )}
@@ -994,7 +990,7 @@ export default function App() {
                           ? `${selectedDates.length} date${selectedDates.length === 1 ? "" : "s"} ready to save.`
                           : "Select dates on the calendar to continue."}
                     </p>
-                    <Button onClick={saveLeaves} disabled={saving || !selectedDates.length || !leaveForm.employee_id || !leaveForm.leave_type_id}>
+                    <Button onClick={saveLeaves} busy={saving && page === "Leave Calendar"} disabled={saving || !selectedDates.length || !leaveForm.employee_id || !leaveForm.leave_type_id}>
                       {saving && page === "Leave Calendar" ? "Saving..." : `Save ${selectedDates.length || ""} leave ${selectedDates.length === 1 ? "date" : "dates"}`}
                     </Button>
                   </div>
@@ -1042,10 +1038,10 @@ export default function App() {
                       <div className="report-actions">
                         <Field label="From"><input type="date" value={reportStart} onChange={(event) => setReportStart(event.target.value)} /></Field>
                         <Field label="To"><input type="date" value={reportEnd} onChange={(event) => setReportEnd(event.target.value)} /></Field>
-                        <Button variant="secondary" onClick={exportCSV} disabled={!reportRangeValid || exportingCsv || preparingPdf}>
+                        <Button variant="secondary" onClick={exportCSV} busy={exportingCsv} disabled={!reportRangeValid || exportingCsv || preparingPdf}>
                           <Icon name="download" /> {exportingCsv ? "Preparing CSV..." : "Export CSV"}
                         </Button>
-                        <Button onClick={exportPDF} disabled={!reportRangeValid || exportingCsv || preparingPdf}>
+                        <Button onClick={exportPDF} busy={preparingPdf} disabled={!reportRangeValid || exportingCsv || preparingPdf}>
                           <Icon name="print" /> {preparingPdf ? "Preparing PDF..." : "Export PDF"}
                         </Button>
                       </div>
@@ -1092,7 +1088,7 @@ export default function App() {
                   endDate={reportEnd}
                   totalHours={reportHours}
                   totalDays={reportDays}
-                  generatedAt={now}
+                  generatedAt={reportGeneratedAt}
                 />
               </section>
             )}
@@ -1116,7 +1112,7 @@ export default function App() {
             </Field>
             <div className="modal-actions">
               <Button variant="secondary" type="button" onClick={() => setEmployeeModal(false)}>Cancel</Button>
-              <Button type="submit" disabled={saving}>{saving ? "Saving employee..." : "Save employee"}</Button>
+              <Button type="submit" busy={saving}>{saving ? "Saving employee..." : "Save employee"}</Button>
             </div>
           </form>
         </Modal>
@@ -1161,7 +1157,7 @@ export default function App() {
             <Field label="Admin remarks"><input value={leaveEditForm.admin_remarks} onChange={(event) => setLeaveEditForm({ ...leaveEditForm, admin_remarks: event.target.value })} /></Field>
             <div className="modal-actions">
               <Button variant="secondary" type="button" onClick={() => setLeaveModal(false)}>Cancel</Button>
-              <Button type="submit" disabled={saving}>{saving ? "Saving correction..." : "Save correction"}</Button>
+              <Button type="submit" busy={saving}>{saving ? "Saving correction..." : "Save correction"}</Button>
             </div>
           </form>
         </Modal>
@@ -1215,7 +1211,7 @@ function LoginPage({ onSubmit, onRetry, error: initialError = "" }) {
             <Field label="Password">
               <input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} />
             </Field>
-            <Button type="submit" disabled={submitting}>{submitting ? "Signing in..." : "Sign in"}</Button>
+            <Button type="submit" busy={submitting}>{submitting ? "Signing in..." : "Sign in"}</Button>
           </form>
         ) : (
           <Button onClick={submit}>Retry connection</Button>
@@ -1244,13 +1240,24 @@ function Icon({ name }) {
     close: <><path d="m18 6-12 12M6 6l12 12" /></>,
     download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5M12 15V3" /></>,
     print: <><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><path d="M6 14h12v8H6z" /></>,
+    logout: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5M21 12H9" /></>,
     trash: <><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6" /><path d="M10 11v5m4-5v5" /></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function Button({ children, variant = "primary", size = "default", ...props }) {
-  return <button className={`button button-${variant} ${size === "small" ? "button-small" : ""}`} {...props}>{children}</button>;
+function Button({ children, variant = "primary", size = "default", busy = false, type = "button", disabled, ...props }) {
+  return (
+    <button
+      type={type}
+      className={`button button-${variant} ${size === "small" ? "button-small" : ""}`}
+      aria-busy={busy || undefined}
+      disabled={disabled || busy}
+      {...props}
+    >
+      {children}
+    </button>
+  );
 }
 
 function IconButton({ label, children, ...props }) {
@@ -1270,8 +1277,8 @@ function Panel({ title, description, action, className = "", children }) {
   );
 }
 
-function Metric({ label, value, detail, icon }) {
-  return <article className="metric-card"><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon name={icon} /></span></div><strong>{value}</strong><small>{detail}</small></article>;
+function Metric({ label, value, detail, icon, tone }) {
+  return <article className={`metric-card${tone ? ` tone-${tone}` : ""}`}><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon name={icon} /></span></div><strong>{value}</strong><small>{detail}</small></article>;
 }
 
 function Field({ label, children }) {
@@ -1291,8 +1298,8 @@ function LoadingState({ message = "Loading your workspace..." }) {
   return <div className="loading-state" role="status"><span className="loading-spinner" /><span>{message}</span></div>;
 }
 
-function EmptyState({ title, description }) {
-  return <div className="empty-state"><span className="empty-mark"><Icon name="check" /></span><b>{title}</b><p>{description}</p></div>;
+function EmptyState({ title, description, icon = "check" }) {
+  return <div className="empty-state"><span className="empty-mark"><Icon name={icon} /></span><b>{title}</b><p>{description}</p></div>;
 }
 
 function WorkspaceSkeleton({ page }) {
@@ -1418,7 +1425,7 @@ function PrintableReport({
       <section className="print-report-section">
         <h2>Employee summary</h2>
         {employees.length ? (
-          <table className="print-table">
+          <table className="print-table print-summary-table">
             <thead><tr><th>Employee</th><th>Code</th><th>Entries</th><th>Leave days</th><th>Leave hours</th></tr></thead>
             <tbody>
               {employees.map(({ employee, entries, hours, days }) => (
@@ -1495,7 +1502,7 @@ function PrintableReport({
 }
 
 function LeaveTable({ leaves, onEdit, onCancel, disabled }) {
-  if (!leaves.length) return <EmptyState title="No leave records found" description="Try changing your search or filters, or record leave for your team." />;
+  if (!leaves.length) return <EmptyState icon="search" title="No leave records found" description="Try changing your search or filters, or record leave for your team." />;
   return (
     <div className="table-wrap">
       <table>
