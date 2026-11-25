@@ -1,0 +1,330 @@
+﻿import { useEffect, useState } from "react";
+import "./App.css";
+
+const API = "http://127.0.0.1:8000/api";
+const today = () => new Date().toISOString().slice(0, 10);
+const blankEmployee = {employee_code:"",full_name:"",email:"",designation:"",department_id:null,employment_status:"active"};
+
+async function api(path, options={}) {
+  const res = await fetch(API+path,{...options,headers:{"Content-Type":"application/json",...options.headers}});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.detail || "Request failed");
+  return data;
+}
+
+export default function App() {
+  const [page,setPage] = useState("Overview");
+  const [employees,setEmployees] = useState([]);
+  const [leaves,setLeaves] = useState([]);
+  const [types,setTypes] = useState([]);
+  const [collisions,setCollisions] = useState([]);
+  const [error,setError] = useState("");
+  const [notice,setNotice] = useState("");
+  const [loading,setLoading] = useState(true);
+  const [employeeModal,setEmployeeModal] = useState(false);
+  const [leaveModal,setLeaveModal] = useState(false);
+  const [editingEmployee,setEditingEmployee] = useState(null);
+  const [employeeForm,setEmployeeForm] = useState(blankEmployee);
+  const [search,setSearch] = useState("");
+  const [month,setMonth] = useState(new Date());
+  const [selectedDates,setSelectedDates] = useState([]);
+  const [leaveForm,setLeaveForm] = useState({employee_id:"",leave_type_id:"",status:"taken",reason:"",admin_remarks:""});
+  const [dateSettings,setDateSettings] = useState({});
+  const [filter,setFilter] = useState("all");
+
+  async function refresh() {
+    try {
+      const [e,l,t,c] = await Promise.all([
+        api("/employees/"),api("/leaves/"),api("/leaves/types"),api("/leaves/collisions")
+      ]);
+      setEmployees(e);setLeaves(l);setTypes(t);setCollisions(c);setError("");
+    } catch(e) {setError(e.message);}
+    finally {setLoading(false);}
+  }
+  useEffect(()=>{refresh();},[]);
+
+  function notify(message){setNotice(message);setTimeout(()=>setNotice(""),3500);}
+  function openAddEmployee(){setEditingEmployee(null);setEmployeeForm(blankEmployee);setEmployeeModal(true);}
+  function openEditEmployee(e){setEditingEmployee(e.id);setEmployeeForm({...e});setEmployeeModal(true);}
+
+  async function saveEmployee(event){
+    event.preventDefault();
+    try{
+      const payload={...employeeForm,department_id:employeeForm.department_id || null};
+      if(editingEmployee) await api(`/employees/${editingEmployee}`,{method:"PUT",body:JSON.stringify(payload)});
+      else await api("/employees/",{method:"POST",body:JSON.stringify(payload)});
+      setEmployeeModal(false);await refresh();notify(editingEmployee?"Employee updated":"Employee added");
+    }catch(e){setError(e.message);}
+  }
+
+  function openLeave(){
+    setSelectedDates([]);
+    setDateSettings({});
+    setLeaveForm({employee_id:"",leave_type_id:types[0]?.id?.toString() || "",status:"taken",reason:"",admin_remarks:""});
+    setLeaveModal(true);
+  }
+
+  function toggleDate(value){
+    setSelectedDates(old=>old.includes(value)?old.filter(d=>d!==value):[...old,value].sort());
+    setDateSettings(old=>({...old,[value]:old[value] || {duration_type:"full_day",start_time:"09:00",end_time:"18:00"}}));
+  }
+
+  function changeSetting(date,key,value){
+    setDateSettings(old=>({...old,[date]:{...old[date], [key]:value}}));
+  }
+
+  async function saveLeaves(event){
+    event.preventDefault();
+    if(!selectedDates.length){setError("Select at least one leave date.");return;}
+    try{
+      for(const date of selectedDates){
+        const setting=dateSettings[date];
+        await api("/leaves/",{method:"POST",body:JSON.stringify({
+          ...leaveForm,employee_id:Number(leaveForm.employee_id),
+          leave_type_id:Number(leaveForm.leave_type_id),leave_date:date,
+          duration_type:setting.duration_type,
+          start_time:setting.duration_type==="custom_hours"?setting.start_time:null,
+          end_time:setting.duration_type==="custom_hours"?setting.end_time:null
+        })});
+      }
+      setLeaveModal(false);await refresh();notify(`${selectedDates.length} leave date(s) recorded`);
+    }catch(e){setError(e.message);await refresh();}
+  }
+
+  async function deleteLeave(id){
+    if(!confirm("Delete this leave entry?"))return;
+    try{await api(`/leaves/${id}`,{method:"DELETE"});await refresh();notify("Leave entry deleted");}
+    catch(e){setError(e.message);}
+  }
+
+  const active=employees.filter(e=>e.employment_status==="active");
+  const todayKey=today();
+  const away=leaves.filter(l=>l.status!=="cancelled"&&l.start_date<=todayKey&&l.end_date>=todayKey);
+  const upcoming=leaves.filter(l=>l.status==="planned"&&l.start_date>=todayKey).sort((a,b)=>a.start_date.localeCompare(b.start_date));
+  const filteredEmployees=employees.filter(e=>(e.full_name+" "+e.employee_code+" "+(e.designation||"")).toLowerCase().includes(search.toLowerCase()));
+  const filteredLeaves=leaves.filter(l=>filter==="all"||l.status===filter);
+  const totalHours=leaves.filter(l=>l.status!=="cancelled").reduce((s,l)=>s+(l.total_hours||0),0);
+
+  const nav=["Overview","Employees","Leave Calendar","Leave Records","Reports"];
+  const first=new Date(month.getFullYear(),month.getMonth(),1);
+  const offset=(first.getDay()+6)%7;
+  const days=Array.from({length:new Date(month.getFullYear(),month.getMonth()+1,0).getDate()},(_,i)=>i+1);
+  const calendar=[...Array(offset).fill(null),...days];
+
+  function dateLeaves(day){
+    if(!day)return [];
+    const key=`${month.getFullYear()}-${String(month.getMonth()+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+    return leaves.filter(l=>l.start_date<=key&&l.end_date>=key&&l.status!=="cancelled");
+  }
+
+  function exportCSV(){
+    const rows=[["Date","Employee","Employee Code","Leave Type","Duration","Start","End","Hours","Status"],
+      ...leaves.map(l=>[l.start_date,l.employee_name,l.employee_code,l.leave_type,l.duration_type,l.start_time,l.end_time,l.total_hours,l.status])];
+    const csv=rows.map(r=>r.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\n");
+    const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));link.download="LeaveHQ-report.csv";link.click();URL.revokeObjectURL(link.href);
+  }
+
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><div className="brand-mark">L</div><div><b>LeaveHQ</b><small>ADMIN WORKSPACE</small></div></div>
+      <div className="side-label">WORKSPACE</div>
+      <nav>{nav.map(n=><button key={n} className={`nav-item ${page===n?"active":""}`} onClick={()=>setPage(n)}><span>{({Overview:"â—«",Employees:"â™™","Leave Calendar":"â–¦","Leave Records":"â˜·",Reports:"â–¤"})[n]}</span>{n}</button>)}</nav>
+      <div className="sidebar-bottom"><div className="admin-avatar">A</div><div><b>Administrator</b><small>Leave management</small></div><span className="online-dot"/></div>
+    </aside>
+
+    <main className="main-area">
+      <header className="topbar"><div><div className="eyebrow">LEAVE MANAGEMENT / {page.toUpperCase()}</div><h1>{page}</h1></div><div className="top-actions"><span className="today-label">{new Date().toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}</span><button className="primary-btn" onClick={openLeave}>ï¼‹ Record leave</button></div></header>
+      {error&&<div className="alert error">{error}<button onClick={()=>setError("")}>Ã—</button></div>}
+      {notice&&<div className="alert success">{notice}<button onClick={()=>setNotice("")}>Ã—</button></div>}
+      {loading?<div className="loading">Loading workspaceâ€¦</div>:<>
+        {page==="Overview"&&<section>
+          <div className="welcome-row"><div><h2>Your people, at a glance.</h2><p>Who is here, who is away and what's coming up.</p></div><button className="subtle-btn" onClick={refresh}>â†» Refresh</button></div>
+          <div className="stats-grid">
+            <Stat label="Active employees" value={active.length} hint="Current workforce" icon="â™™"/>
+            <Stat label="On leave today" value={away.length} hint="People away today" icon="â—·" accent="orange"/>
+            <Stat label="Upcoming leave dates" value={upcoming.length} hint="Planned absences" icon="â–¦" accent="purple"/>
+            <Stat label="Leave hours recorded" value={totalHours} hint="Excluding cancelled" icon="â—·" accent="green"/>
+          </div>
+          <div className="overview-grid">
+            <div className="panel"><div className="panel-heading"><div><h3>Who's away today</h3><p>{todayKey}</p></div><button className="text-btn" onClick={()=>setPage("Leave Records")}>View all â†—</button></div>
+              {away.length?away.map(l=><Person key={l.id} leave={l}/>):<Empty title="Everyone's accounted for" text="No leave recorded today."/>}
+            </div>
+            <div className="panel"><div className="panel-heading"><div><h3>Upcoming leave</h3><p>Next planned absences</p></div></div>
+              {upcoming.slice(0,6).map(l=><Person key={l.id} leave={l}/>)}{!upcoming.length&&<Empty title="Nothing scheduled" text="Planned leave appears here."/>}
+            </div>
+          </div>
+          <div className="panel"><div className="panel-heading"><div><h3>Leave collisions</h3><p>Employees with overlapping absence times</p></div><button className="text-btn" onClick={()=>setPage("Reports")}>Full report â†—</button></div>
+            {collisions.length?collisions.slice(0,5).map((c,i)=><Collision key={i} c={c}/>):<Empty title="No overlapping absences" text="No time collisions detected in the recorded leaves."/>}
+          </div>
+        </section>}
+
+        {page==="Employees"&&<section>
+          <div className="section-toolbar"><div><h2>Employee directory</h2><p>Edit employee details whenever they change.</p></div><button className="primary-btn" onClick={openAddEmployee}>ï¼‹ Add employee</button></div>
+          <div className="panel"><div className="table-toolbar"><input className="search-input" placeholder="Search employeesâ€¦" value={search} onChange={e=>setSearch(e.target.value)}/><span className="muted">{filteredEmployees.length} employees</span></div>
+            <div className="employee-grid">{filteredEmployees.map(e=><div className="employee-card" key={e.id}><div className="employee-avatar">{e.full_name.split(" ").map(x=>x[0]).slice(0,2).join("").toUpperCase()}</div><div className="employee-detail"><b>{e.full_name}</b><small>{e.designation||"No designation"}</small><span>{e.employee_code} Â· {e.email||"No email"}</span></div><span className={`status-pill ${e.employment_status}`}>{e.employment_status}</span><button className="subtle-btn edit-btn" onClick={()=>openEditEmployee(e)}>Edit</button></div>)}</div>
+            {!filteredEmployees.length&&<Empty title="No employees found" text="Add an employee or change your search."/>}
+          </div>
+        </section>}
+
+        {page==="Leave Calendar"&&<section>
+          <div className="section-toolbar">
+            <div><h2>Team leave calendar</h2><p>Select multiple dates and record leave in one operation.</p></div>
+          </div>
+
+          <div className="panel quick-calendar-assignment">
+            <h3>Quick leave assignment</h3>
+            <div className="quick-controls">
+              <Field label="Employee">
+                <select value={leaveForm.employee_id} onChange={e=>setLeaveForm({...leaveForm,employee_id:e.target.value})}>
+                  <option value="">Choose employee</option>
+                  {active.map(e=><option key={e.id} value={e.id}>{e.full_name} ({e.employee_code})</option>)}
+                </select>
+              </Field>
+              <Field label="Leave type">
+                <select value={leaveForm.leave_type_id} onChange={e=>setLeaveForm({...leaveForm,leave_type_id:e.target.value})}>
+                  <option value="">Choose leave type</option>
+                  {types.filter(t=>t.is_active!==false).map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+              <Field label="Status">
+                <select value={leaveForm.status} onChange={e=>setLeaveForm({...leaveForm,status:e.target.value})}>
+                  <option value="taken">Taken</option>
+                  <option value="planned">Planned</option>
+                </select>
+              </Field>
+              <Field label="Apply duration to selected dates">
+                <select value="individual" onChange={e=>{
+                  if(e.target.value!=="individual"){
+                    setDateSettings(old=>{
+                      const next={...old};
+                      selectedDates.forEach(d=>{next[d]={...next[d],duration_type:e.target.value,start_time:"09:00",end_time:"18:00"};});
+                      return next;
+                    });
+                  }
+                }}>
+                  <option value="individual">Keep individual settings</option>
+                  <option value="full_day">Full day</option>
+                  <option value="first_half">First half</option>
+                  <option value="second_half">Second half</option>
+                </select>
+              </Field>
+            </div>
+
+            <div className="calendar-head">
+              <button className="icon-btn" onClick={()=>setMonth(new Date(month.getFullYear(),month.getMonth()-1,1))}>â€¹</button>
+              <h3>{month.toLocaleDateString("en-IN",{month:"long",year:"numeric"})}</h3>
+              <button className="icon-btn" onClick={()=>setMonth(new Date(month.getFullYear(),month.getMonth()+1,1))}>â€º</button>
+              <button className="text-btn" onClick={()=>setMonth(new Date())}>Today</button>
+            </div>
+
+            <div className="calendar-grid">
+              {["MON","TUE","WED","THU","FRI","SAT","SUN"].map(d=><div className="weekday" key={d}>{d}</div>)}
+              {calendar.map((day,i)=>{
+                const date=day?String(month.getFullYear())+"-"+String(month.getMonth()+1).padStart(2,"0")+"-"+String(day).padStart(2,"0"):null;
+                const chosen=date&&selectedDates.includes(date);
+                return <div className="calendar-cell quick-calendar-cell" key={i}>
+                  {day&&<>
+                    <button type="button" className={"quick-day "+(chosen?"quick-selected":"")} onClick={()=>toggleDate(date)}>
+                      <span className="day-number">{day}</span>
+                      <span className="quick-day-hint">{chosen?"Selected Â· click to remove":"ï¼‹ Select date"}</span>
+                    </button>
+                    <div className="day-leaves">
+                      {dateLeaves(day).slice(0,3).map(l=><div className={"calendar-event "+l.status} key={l.id}>{l.employee_name.split(" ")[0]} <small>{l.start_time?.slice(0,5)}â€“{l.end_time?.slice(0,5)}</small></div>)}
+                    </div>
+                  </>}
+                </div>;
+              })}
+            </div>
+
+            {selectedDates.length>0&&<div className="quick-selected-list">
+              <div className="quick-selected-heading"><b>{selectedDates.length} date(s) selected</b><button type="button" className="text-btn" onClick={()=>{setSelectedDates([]);setDateSettings({});}}>Clear selection</button></div>
+              {selectedDates.map(date=><div className="quick-date-setting" key={date}>
+                <b>{new Date(date+"T00:00:00").toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}</b>
+                <select value={dateSettings[date]?.duration_type||"full_day"} onChange={e=>changeSetting(date,"duration_type",e.target.value)}>
+                  <option value="full_day">Full day</option>
+                  <option value="first_half">First half</option>
+                  <option value="second_half">Second half</option>
+                  <option value="custom_hours">Custom hours</option>
+                </select>
+                {dateSettings[date]?.duration_type==="custom_hours"&&<>
+                  <input type="time" value={dateSettings[date]?.start_time||"09:00"} onChange={e=>changeSetting(date,"start_time",e.target.value)}/>
+                  <span>to</span>
+                  <input type="time" value={dateSettings[date]?.end_time||"18:00"} onChange={e=>changeSetting(date,"end_time",e.target.value)}/>
+                </>}
+                <button type="button" className="delete-btn" onClick={()=>toggleDate(date)}>Ã—</button>
+              </div>)}
+            </div>}
+
+            <div className="quick-controls quick-extra-fields">
+              <Field label="Reason (optional)">
+                <input value={leaveForm.reason} onChange={e=>setLeaveForm({...leaveForm,reason:e.target.value})} placeholder="Reason for leave"/>
+              </Field>
+              <Field label="Admin remarks (optional)">
+                <input value={leaveForm.admin_remarks} onChange={e=>setLeaveForm({...leaveForm,admin_remarks:e.target.value})} placeholder="Internal notes"/>
+              </Field>
+            </div>
+            <div className="quick-footer">
+              <span className="muted">Select dates, set durations, then save once.</span>
+              <button type="button" className="primary-btn" disabled={!selectedDates.length||!leaveForm.employee_id||!leaveForm.leave_type_id} onClick={saveLeaves}>
+                Save {selectedDates.length} leave date(s)
+              </button>
+            </div>
+          </div>
+          <div className="calendar-legend"><span><i className="legend-dot"/>Taken</span><span><i className="legend-dot planned"/>Planned</span></div>
+        </section>}
+
+        {page==="Leave Records"&&<section>
+          <div className="section-toolbar"><div><h2>Leave records</h2><p>Individual date and time entries.</p></div></div>
+          <div className="panel"><div className="table-toolbar"><span className="muted">{filteredLeaves.length} records</span><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">All statuses</option><option value="taken">Taken</option><option value="planned">Planned</option><option value="cancelled">Cancelled</option></select></div><LeaveTable leaves={filteredLeaves} onDelete={deleteLeave}/></div>
+        </section>}
+
+        {page==="Reports"&&<section>
+          <div className="welcome-row"><div><h2>Management reports</h2><p>Leave totals, time overlaps and employee availability.</p></div><div className="report-actions"><button className="subtle-btn" onClick={exportCSV}>â†“ Export CSV</button><button className="primary-btn" onClick={()=>window.print()}>Print / PDF</button></div></div>
+          <div className="stats-grid"><Stat label="Employees" value={employees.length} hint="All employee records" icon="â™™"/><Stat label="Leave entries" value={leaves.length} hint="Individual date entries" icon="â–¤"/><Stat label="Total leave hours" value={totalHours} hint="Excluding cancelled" icon="â—·"/><Stat label="Collision pairs" value={collisions.length} hint="Overlapping employee pairs" icon="âš " accent="orange"/></div>
+          <div className="panel"><div className="panel-heading"><div><h3>Overlapping absences</h3><p>Two or more employees unavailable during the same time window.</p></div></div>
+            {collisions.length?collisions.map((c,i)=><Collision key={i} c={c}/>):<Empty title="No collisions found" text="There are no overlapping recorded absences."/>}
+          </div>
+          <div className="panel"><div className="panel-heading"><div><h3>Employee leave summary</h3><p>Hours and days recorded for each employee.</p></div></div>
+            <div className="table-wrap"><table><thead><tr><th>EMPLOYEE</th><th>ENTRIES</th><th>LEAVE HOURS</th><th>LEAVE DAYS</th></tr></thead><tbody>{employees.map(e=>{const own=leaves.filter(l=>l.employee_id===e.id&&l.status!=="cancelled");const hours=own.reduce((s,l)=>s+(l.total_hours||0),0);return <tr key={e.id}><td><b>{e.full_name}</b><small className="cell-sub">{e.employee_code}</small></td><td>{own.length}</td><td>{hours}</td><td>{(hours/8).toFixed(2)}</td></tr>})}</tbody></table></div>
+          </div>
+        </section>}
+      </>}
+      <footer>LeaveHQ Â· Internal leave tracking</footer>
+    </main>
+
+    {employeeModal&&<Modal title={editingEmployee?"Edit employee":"Add employee"} close={()=>setEmployeeModal(false)}><form onSubmit={saveEmployee}>
+      <Field label="Employee code"><input required value={employeeForm.employee_code} onChange={e=>setEmployeeForm({...employeeForm,employee_code:e.target.value})}/></Field>
+      <Field label="Full name"><input required value={employeeForm.full_name} onChange={e=>setEmployeeForm({...employeeForm,full_name:e.target.value})}/></Field>
+      <Field label="Email"><input type="email" value={employeeForm.email||""} onChange={e=>setEmployeeForm({...employeeForm,email:e.target.value})}/></Field>
+      <Field label="Designation"><input value={employeeForm.designation||""} onChange={e=>setEmployeeForm({...employeeForm,designation:e.target.value})}/></Field>
+      <Field label="Employment status"><select value={employeeForm.employment_status} onChange={e=>setEmployeeForm({...employeeForm,employment_status:e.target.value})}><option value="active">Active</option><option value="inactive">Inactive</option></select></Field>
+      <div className="modal-actions"><button type="button" className="subtle-btn" onClick={()=>setEmployeeModal(false)}>Cancel</button><button className="primary-btn">Save employee</button></div>
+    </form></Modal>}
+
+    {leaveModal&&<Modal title="Record leave dates" close={()=>setLeaveModal(false)}><form onSubmit={saveLeaves}>
+      <Field label="Employee"><select required value={leaveForm.employee_id} onChange={e=>setLeaveForm({...leaveForm,employee_id:e.target.value})}><option value="">Select employee</option>{active.map(e=><option key={e.id} value={e.id}>{e.full_name} ({e.employee_code})</option>)}</select></Field>
+      <Field label="Leave type"><select required value={leaveForm.leave_type_id} onChange={e=>setLeaveForm({...leaveForm,leave_type_id:e.target.value})}><option value="">Select type</option>{types.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></Field>
+      <Field label="Select individual dates"><input type="date" min="2020-01-01" onChange={e=>e.target.value&&toggleDate(e.target.value)}/></Field>
+      <div className="date-chip-list">{selectedDates.map(d=><button type="button" className="date-chip" key={d} onClick={()=>toggleDate(d)}>{d} Ã—</button>)}</div>
+      {selectedDates.map(d=><div className="date-setting" key={d}><b>{new Date(d+"T00:00:00").toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}</b>
+        <select value={dateSettings[d]?.duration_type||"full_day"} onChange={e=>changeSetting(d,"duration_type",e.target.value)}>
+          <option value="full_day">Full day (9 AMâ€“6 PM)</option><option value="first_half">First half (9 AMâ€“1 PM)</option><option value="second_half">Second half (2 PMâ€“6 PM)</option><option value="custom_hours">Custom hours</option>
+        </select>
+        {dateSettings[d]?.duration_type==="custom_hours"&&<div className="form-row"><Field label="From"><input type="time" value={dateSettings[d].start_time} onChange={e=>changeSetting(d,"start_time",e.target.value)}/></Field><Field label="To"><input type="time" value={dateSettings[d].end_time} onChange={e=>changeSetting(d,"end_time",e.target.value)}/></Field></div>}
+      </div>)}
+      <Field label="Status"><select value={leaveForm.status} onChange={e=>setLeaveForm({...leaveForm,status:e.target.value})}><option value="taken">Taken</option><option value="planned">Planned</option></select></Field>
+      <Field label="Reason / note"><textarea rows="2" value={leaveForm.reason} onChange={e=>setLeaveForm({...leaveForm,reason:e.target.value})}/></Field>
+      <Field label="Admin remarks"><textarea rows="2" value={leaveForm.admin_remarks} onChange={e=>setLeaveForm({...leaveForm,admin_remarks:e.target.value})}/></Field>
+      <div className="modal-actions"><button type="button" className="subtle-btn" onClick={()=>setLeaveModal(false)}>Cancel</button><button className="primary-btn" disabled={!selectedDates.length}>Save {selectedDates.length} date(s)</button></div>
+    </form></Modal>}
+  </div>;
+}
+
+function Stat({label,value,hint,icon,accent=""}){return <div className="stat-card"><div className={`stat-icon ${accent}`}>{icon}</div><div className="stat-label">{label}</div><div className="stat-value">{value}</div><div className="stat-hint">{hint}</div></div>}
+function Empty({title,text}){return <div className="empty-state"><div className="empty-icon">â—Œ</div><b>{title}</b><p>{text}</p></div>}
+function Person({leave}){return <div className="person-row"><div className="person-avatar">{leave.employee_name.split(" ").map(x=>x[0]).slice(0,2).join("")}</div><div className="person-info"><b>{leave.employee_name}</b><small>{leave.leave_type} Â· {leave.start_time?.slice(0,5)}â€“{leave.end_time?.slice(0,5)}</small></div><span className="leave-tag">{leave.total_hours}h</span></div>}
+function Collision({c}){return <div className="collision-row"><div className="collision-icon">!</div><div><b>{c.employee_1} + {c.employee_2}</b><small>{c.date} Â· Overlap: {c.overlap_start?.slice(0,5)}â€“{c.overlap_end?.slice(0,5)}</small></div><span className="status-pill planned">Overlap</span></div>}
+function Field({label,children}){return <label className="field"><span>{label}</span>{children}</label>}
+function Modal({title,close,children}){return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&close()}><div className="modal"><div className="modal-heading"><h3>{title}</h3><button type="button" className="icon-btn" onClick={close}>Ã—</button></div>{children}</div></div>}
+function LeaveTable({leaves,onDelete}){if(!leaves.length)return <Empty title="No leave records" text="Recorded leave entries will appear here."/>;return <div className="table-wrap"><table><thead><tr><th>EMPLOYEE</th><th>TYPE</th><th>DATE</th><th>TIME</th><th>HOURS</th><th>STATUS</th><th/></tr></thead><tbody>{leaves.map(l=><tr key={l.id}><td><b>{l.employee_name}</b><small className="cell-sub">{l.employee_code}</small></td><td>{l.leave_type}</td><td>{l.start_date}</td><td>{l.start_time?.slice(0,5)}â€“{l.end_time?.slice(0,5)}</td><td>{l.total_hours}</td><td><span className={`status-pill ${l.status}`}>{l.status}</span></td><td><button className="delete-btn" onClick={()=>onDelete(l.id)}>Ã—</button></td></tr>)}</tbody></table></div>}
+
